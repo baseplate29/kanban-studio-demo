@@ -3,34 +3,29 @@
 ## Business Requirements
 
 This project is building a Project Management App. Key features:
-- A user can sign in
-- When signed in, the user sees a Kanban board representing their project
+- Users can sign up and sign in with a username and password
+- All signed-in users share one Kanban board and edit it collaboratively
 - The Kanban board has fixed columns that can be renamed
 - The cards on the Kanban board can be moved with drag and drop, and edited
+- Changes made by other users appear via polling refresh (every few seconds)
 - There is an AI chat feature in a sidebar; the AI is able to create / edit / move one or more cards
 
 ## Limitations
 
-For the MVP, there will only be a user sign in (hardcoded to 'user' and 'password') but the database will support multiple users for future.
+For the MVP, there is one shared Kanban board for all users, but the schema should allow multiple boards in the future.
 
-For the MVP, there will only be 1 Kanban board per signed in user.
-
-For the MVP, this will run locally (in a docker container)
+For the MVP, concurrent edits are last-write-wins; polling keeps everyone roughly in sync. No websockets/real-time.
 
 ## Technical Decisions
 
-- NextJS frontend
-- Python FastAPI backend, including serving the static NextJS site at /
-- Everything packaged into a Docker container
-- Use "uv" as the package manager for python in the Docker container
+- Full-stack Next.js (App Router, TypeScript) at the repo root. No separate backend: API logic lives in Next.js Route Handlers / Server Actions
+- Postgres as the database, accessed via the standard `pg` (node-postgres) driver with Drizzle ORM; the app always connects through `DATABASE_URL` in `.env`
+- Local development: plain Postgres in Docker (official `postgres` image via docker-compose) on localhost:5432
+- Production: deployed on Vercel, connected to Neon (same code and migrations, just a different `DATABASE_URL`)
+- Auth built in-app: username/password signup and login, passwords hashed (bcrypt), session in a signed HTTP-only cookie
 - Use OpenRouter for the AI calls. An OPENROUTER_API_KEY is in .env in the project root
 - Use `openai/gpt-oss-120b` as the model
-- Use SQLLite local database for the database, creating a new db if it doesn't exist
-- Start and Stop server scripts for Mac, PC, Linux in scripts/
-
-## Starting Point
-
-A working MVP of the frontend has been built and is already in frontend. This is not yet designed for the Docker setup. It's a pure frontend-only demo.
+- Run locally with `npm run dev` plus `docker compose up` for the database
 
 ## Color Scheme
 
