@@ -1,62 +1,73 @@
-# Live Demo Plan
+# Demo Build Spec
 
-A ~30 minute live vibe-coding session: start from the prebuilt frontend on the `demo-start` branch and build the backend and the AI assistant live with Claude Code.
+This document instructs Claude Code to build the backend and AI assistant for this app. The styled frontend already exists and works in guest mode with in-memory state. Follow the stages in order — after each stage the app must run, so the demo always has a working checkpoint. Do not restructure or restyle the existing frontend.
 
-## Branches
+**For the human running the demo:** check out `demo-start`, run `npm install`, have Docker running with `postgres:18` pulled, and put `OPENROUTER_API_KEY`, `DATABASE_URL=postgres://postgres:postgres@localhost:5432/kanban`, and `SESSION_SECRET` in `.env` (trailing newline!). Then paste one prompt: "Read docs/DEMO.md and build stage 1" — then stage 2, then stage 3. Or ask for all three at once. If pressed for time, skip stage 2 (auth); the app works in guest mode without it. The finished reference implementation is on the `main` branch.
 
-- `main` — the finished reference app. Safety net: if a live step stalls, copy the corresponding file from here (`git show main:lib/ai.ts`, etc.) or diff against it.
-- `demo-start` — the session's starting point. Full styled frontend (board with drag and drop, optimistic updates, polling, auth screen, app shell, dark mode) but no database, no auth logic, no AI. The board works with in-memory state; changes vanish on reload — that is the opening narrative.
+## What already exists (do not rebuild)
 
-## Before the session (do not skip)
+- Next.js 16 App Router at the repo root, Tailwind v4, shadcn/ui. All dependencies are installed, including drizzle-orm, drizzle-kit, pg, bcryptjs, jose, tsx.
+- `lib/board.ts` — Board/Column/Card types and pure state operations.
+- `lib/board-api.ts` — the fetch layer the UI already calls. The endpoints it expects are the contract in stage 1.
+- `components/board-view.tsx` — board UI with drag and drop, optimistic updates via a serialized request queue, 3-second polling of `GET /api/board`, and a `refreshSignal` prop that forces a refetch (used by the AI chat in stage 3).
+- `components/auth-forms.tsx` — login/signup screen (`AuthScreen`). It calls `signup` and `login` from `app/auth-actions.ts` via `useActionState`; those are currently stubs.
+- `components/app-sidebar.tsx` / `nav-user.tsx` — app shell; `NavUser` calls the `logout` action. `AppSidebar` takes a `username` prop.
+- `app/page.tsx` — guest mode with a hardcoded empty board. Stage 2 replaces this.
+- `components/workspace.tsx` — renders `BoardView` only. Stage 3 adds the chat sidebar here.
+- `next.config.ts` already allows Server Actions from `*.app.github.dev`.
 
-1. `git checkout demo-start` and `npm install`.
-2. Docker running; `docker pull postgres:18` in advance (pulling live wastes minutes).
-3. `.env` in the repo root with `OPENROUTER_API_KEY`, `DATABASE_URL=postgres://postgres:postgres@localhost:5432/kanban`, and a `SESSION_SECRET` (openssl rand -hex 32). Note: end the file with a newline.
-4. `npm run dev` serves the board at localhost:3000 in guest mode.
-5. Do one full practice run.
+## Stage 1: Postgres persistence
 
-## Live build plan (~30 min)
+1. `docker-compose.yml`: official `postgres:18` image, database `kanban`, password `postgres`, port 5432, named volume mounted at `/var/lib/postgresql`.
+2. Drizzle schema in `lib/db/schema.ts`, all ids `uuid` with `defaultRandom()`:
+   - `users`: id, username (unique, not null), password_hash (not null), created_at timestamptz default now
+   - `boards`: id, name (not null)
+   - `columns`: id, board_id FK -> boards cascade delete, name, position integer
+   - `cards`: id, column_id FK -> columns cascade delete, title, description (not null, default ''), position integer, created_at
+3. `lib/db/index.ts`: pg Pool from `DATABASE_URL` + drizzle instance. `drizzle.config.ts` uses `process.loadEnvFile(".env")` (drizzle-kit does not load .env itself). Add npm scripts: `db:generate`, `db:migrate`, `db:seed` (seed via `tsx --env-file=.env`; no top-level await — wrap in `async function main()`).
+4. Seed: create one board ("Shared Board") with columns To Do / In Progress / Done at positions 0/1/2, plus a few sample cards. Idempotent — skip if a board exists.
+5. `lib/board-store.ts`: `getBoard()` (first board row is THE board; columns and cards ordered by position), `renameColumn`, `createCard` (accept optional client-supplied id; position = max+1 in column), `updateCard`, `deleteCard`, `moveCard(cardId, toColumnId, toIndex)` (transaction: remove from source, splice into target order, renumber target column). Last-write-wins, no locking.
+6. Route handlers (return 401 `{error}` when there is no session — until stage 2 exists, a `getSession()` that returns a fake session is fine, or gate only after stage 2; pick the simplest that keeps stages independent):
+   - `GET /api/board` -> `{ "columns": [ { "id", "name", "cards": [ { "id", "title", "description" } ] } ] }`
+   - `PATCH /api/columns/[columnId]` body `{ name }` (400 on empty)
+   - `POST /api/cards` body `{ id?, columnId, title, description? }` (400 on empty title)
+   - `PATCH /api/cards/[cardId]` body `{ title?, description? }` to edit OR `{ toColumnId, toIndex }` to move
+   - `DELETE /api/cards/[cardId]`
+7. Do NOT change `lib/board-api.ts` — it already matches this contract exactly.
+8. Update `app/page.tsx` to load the board server-side from the store instead of the hardcoded one (keep guest mode / no auth until stage 2).
 
-Times assume Claude Code does the writing; you narrate and verify.
+Checkpoint: `docker compose up -d`, migrate, seed, `npm run dev` — create and drag a card, reload the page, it persists.
 
-1. **Intro (2 min).** Show the board working, reload the page, changes are gone. "Let's give it a real backend."
-2. **Database + persistence (8 min).** Prompt Claude for: docker-compose with `postgres:18`, Drizzle schema (users, boards, columns, cards — schema below), migrate, seed the shared board, then route handlers matching the contract below. The frontend is already calling these endpoints — the moment they exist, reload and the board persists. That is the first payoff.
-3. **Auth (6 min — CUT THIS IF BEHIND).** bcrypt password hashing, JWT session in an HTTP-only cookie, implement the stubbed server actions in `app/auth-actions.ts`, gate the page on a session. The login/signup UI already exists.
-4. **AI assistant (12 min).** OpenRouter client with model `openai/gpt-oss-120b`; POST `/api/chat` that sends the board JSON plus conversation, gets Structured Outputs back (reply + card actions), validates and applies them; chat sidebar UI with a board refresh on apply. Finish by asking the AI to "add three cards for launch prep and move one to In Progress" — the wow moment.
-5. **Buffer (2 min).**
+## Stage 2: Auth (skippable)
 
-## Contracts the frontend already expects
+1. `lib/password.ts`: bcryptjs `hashPassword`/`verifyPassword` and `validateSignup` (username >= 3 chars, password >= 8 chars, return error string or null).
+2. `lib/session.ts`: jose HS256 JWT (`SESSION_SECRET`) in an HTTP-only cookie named `session`, sameSite lax, 7 days; `createSession({userId, username})`, `getSession()`, `destroySession()`.
+3. Implement `app/auth-actions.ts` for real: `signup(prev, formData)` and `login(prev, formData)` returning an error string or null ("Username is already taken", "Invalid username or password"), creating the session and `revalidatePath("/")` on success; `logout()` destroys the session. Keep the exported names and shapes — the UI already uses them.
+4. `app/page.tsx`: no session -> render `AuthScreen`; with session -> current shell with `username={session.username}`.
+5. Gate every route handler from stage 1 behind `getSession()` -> 401.
 
-Board JSON (returned by GET /api/board):
+Checkpoint: signup, logout via the avatar menu, login again; board only reachable when signed in.
 
-```json
-{ "columns": [ { "id": "uuid", "name": "To Do", "cards": [ { "id": "uuid", "title": "", "description": "" } ] } ] }
-```
+## Stage 3: AI assistant
 
-Endpoints called by `lib/board-api.ts` (all JSON, all require a session once auth exists):
+1. `lib/ai.ts`: `chatCompletion(messages, responseFormat?)` — plain fetch to `https://openrouter.ai/api/v1/chat/completions`, model `openai/gpt-oss-120b`, bearer `OPENROUTER_API_KEY`. **When sending `response_format`, also send `provider: { require_parameters: true }`** — otherwise OpenRouter may route to a provider that silently ignores structured outputs and returns free-form JSON.
+2. `lib/ai-actions.ts`: a JSON-schema `RESPONSE_FORMAT` (strict json_schema) for `{ reply: string, actions: [...] }` where each action is one of:
+   - `{ type: "create_card", columnId, title, description }`
+   - `{ type: "update_card", cardId, title: string|null, description: string|null }` (null = unchanged)
+   - `{ type: "move_card", cardId, toColumnId, toIndex: integer|null }` (null = end)
+   - `{ type: "delete_card", cardId }`
+   Plus `parseAiResponse(text)` (structural validation, null on malformed), `validateActions(actions, board)` (ids must exist, titles non-empty), and `applyActions(actions)` calling the stage 1 store functions.
+3. `POST /api/chat`: session-gated; body `{ messages: [{role: "user"|"assistant", content}] }`; system prompt contains the current board JSON (with real ids), tells the model to use exact ids and return empty actions for pure conversation, and spells out the JSON response shape as a fallback; call `chatCompletion` with `RESPONSE_FORMAT`; parse -> validate -> apply; respond `{ reply, applied: boolean }` (applied = actions were applied). On a malformed model response, reply "Sorry, I could not process that request." with applied false — never 500.
+4. `components/chat-sidebar.tsx`: `ChatSidebar({ onBoardChanged, className? })` — header with a bot avatar and "AI Assistant", scrollable message list (user bubbles right in `bg-primary`, assistant left with bot avatar in `bg-muted`), empty state, "Thinking..." loading state, input + Send (`type="submit"`). Keep full history in state and send it all each turn. Auto-scroll the list to the bottom on new messages. Call `onBoardChanged()` when the response has `applied: true`.
+5. Wire into `components/workspace.tsx`: desktop — chat as a fixed `w-80` right panel; mobile (`useIsMobile`) — floating bot button bottom-right opening the chat in a right-side `Sheet` (chat gets `className="h-full w-full border-l-0"`, add an sr-only SheetTitle). `onBoardChanged` increments a counter passed to `BoardView`'s existing `refreshSignal` prop.
 
-- `GET /api/board` — full board
-- `PATCH /api/columns/:id` — `{ name }`
-- `POST /api/cards` — `{ id?, columnId, title, description? }` (client may supply the uuid)
-- `PATCH /api/cards/:id` — `{ title?, description? }` to edit, or `{ toColumnId, toIndex }` to move
-- `DELETE /api/cards/:id`
+Checkpoint: ask the chat to "add three cards for launch prep and move one to In Progress" — cards appear on the board without a reload.
 
-Schema: users (id uuid, username unique, password_hash, created_at), boards (id, name), columns (id, board_id FK, name, position int), cards (id, column_id FK, title, description default '', position int, created_at). One row in boards is "the" shared board. Ordering via integer position, moves renumber the target column. Concurrency is last-write-wins.
+## Rules and gotchas (treat as constraints)
 
-Auth stubs to implement live: `signup`, `login`, `logout` in `app/auth-actions.ts` (signatures already match the UI's `useActionState` usage — return an error string or null).
-
-## Gotchas (each of these cost real time when this app was first built)
-
-- **OpenRouter ignores `response_format` on some providers.** Send `provider: { require_parameters: true }` in the request body or the model returns free-form JSON and structured outputs silently fail. Also spell out the JSON shape in the system prompt as a fallback.
-- **Server Actions through a Codespaces forwarded URL** fail with "Invalid Server Actions request" — `next.config.ts` needs `experimental.serverActions.allowedOrigins: ["localhost:3000", "*.app.github.dev"]` (already present on `demo-start`).
-- **`.env` without a trailing newline**: appending `VAR=...` glues it onto the previous line. Always check.
-- **shadcn (Base UI) `<Button>` defaults to `type="button"`** — a Button submitting a form needs an explicit `type="submit"` or the form silently does nothing.
-- **tsx scripts**: no top-level await in this repo's module setup — wrap in `async function main()`.
-- **Next 16 allows one dev server per project.** A second `next dev` refuses to start (the e2e setup on `main` works around it with a separate `NEXT_DIST_DIR`).
-- **AI output is nondeterministic** — occasionally the model returns a junk reply. If the live AI call flubs, just send the message again; do not debug it on stage.
-
-## Suggested live prompts
-
-1. "Add Postgres persistence: docker-compose with postgres:18, a Drizzle schema for users/boards/columns/cards per docs/DEMO.md, migrations, a seed for the shared board with To Do / In Progress / Done, and route handlers matching the contract in docs/DEMO.md. The frontend fetch layer in lib/board-api.ts already calls those endpoints."
-2. "Implement the auth stubs in app/auth-actions.ts: bcrypt-hashed signup/login against the users table, JWT session in an HTTP-only cookie, and gate the board behind login in app/page.tsx."
-3. "Add an AI assistant: OpenRouter client (model openai/gpt-oss-120b, key in .env), a POST /api/chat route that sends the current board JSON with the conversation and uses Structured Outputs to return a reply plus card actions (create/update/move/delete), validates and applies them, and a chat sidebar next to the board that refreshes it when the AI makes changes. Mind the OpenRouter gotcha in docs/DEMO.md."
+- Match the existing code style; no emojis anywhere; keep it simple, no over-engineering, no extra features beyond this spec.
+- shadcn here is Base UI-based: a `<Button>` that submits a form MUST have explicit `type="submit"`; `DropdownMenuLabel` must sit inside `DropdownMenuGroup`.
+- `.env` edits: never append without checking the trailing newline.
+- Next 16 allows one dev server per project — do not start a second one; the running one hot-reloads.
+- Model output is nondeterministic: if an AI reply comes back as junk during verification, retry once rather than debugging.
+- Verify with `npm run lint` and `npm test` (frontend unit tests must stay green) after each stage; write new tests only if explicitly asked — demo time is limited.
